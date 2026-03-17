@@ -1,0 +1,43 @@
+model_list:
+  # Map all Claude model names Claude Code might request → Qwen on LM Studio
+  - model_name: claude-sonnet-4-20250514
+    litellm_params:
+      model: openai/qwen3.5-35b-a3b-mlx
+      api_base: http://localhost:1234/v1
+      api_key: lm-studio
+      drop_params: true
+
+  - model_name: claude-opus-4-20250514
+    litellm_params:
+      model: openai/qwen3.5-35b-a3b-mlx
+      api_base: http://localhost:1234/v1
+      api_key: lm-studio
+      drop_params: true
+
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: openai/qwen3.5-35b-a3b-mlx
+      api_base: http://localhost:1234/v1
+      api_key: lm-studio
+      drop_params: true
+
+  - model_name: claude-sonnet-4-6-20250827
+    litellm_params:
+      model: openai/qwen3.5-35b-a3b-mlx
+      api_base: http://localhost:1234/v1
+      api_key: lm-studio
+      drop_params: true
+
+  - model_name: claude-opus-4-6-20250827
+    litellm_params:
+      model: openai/qwen3.5-35b-a3b-mlx
+      api_base: http://localhost:1234/v1
+      api_key: lm-studio
+      drop_params: true
+
+litellm_settings:
+  drop_params: true
+  num_retries: 0
+
+general_settings:
+  master_key: sk-1234
