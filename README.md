@@ -2,6 +2,13 @@
 
 Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) against local models via [LM Studio](https://lmstudio.ai) — no Anthropic API key needed.
 
+This is a lightweight proxy that sits between Claude Code and LM Studio, handling compatibility issues that would otherwise cause hangs or errors:
+
+Haiku interception — Claude Code sends background requests to Haiku models; these are faked instantly so they don't block your local model
+Image relocation — moves images from tool_result blocks (which LM Studio rejects) into the surrounding user message
+Token counting — fakes the /count_tokens endpoint
+max_tokens boost — increases max_tokens for thinking models that need headroom
+
 ## Quick start
 
 1. Install [uv](https://docs.astral.sh/uv/), [LM Studio](https://lmstudio.ai), and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm i -g @anthropic-ai/claude-code`)
