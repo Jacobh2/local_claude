@@ -8,8 +8,9 @@ LOCAL_HOME="$HOME/.local_claude"
 LM_STUDIO="http://localhost:1234"
 PROXY="http://localhost:4000"
 PROXY_PORT=4000
-CONTEXT_LENGTH=262144
-DEFAULT_MODEL="qwen3.5-122b-a10b@4bit"
+CONTEXT_LENGTH=131072
+DEFAULT_MODEL="openai/gpt-oss-20b"
+# qwen3.5-122b-a10b@4bit
 
 # --- Setup isolated home (avoids auth conflict with claude.ai) ---
 if [ ! -d "$LOCAL_HOME" ]; then
@@ -37,6 +38,16 @@ except: pass
     if [ "$loaded_ctx" = "$CONTEXT_LENGTH" ]; then
         echo "[local_claude] $model loaded (ctx=$CONTEXT_LENGTH)"
         return
+    fi
+
+    if [ -n "$loaded_ctx" ] && [ "$loaded_ctx" != "0" ]; then
+        read -rp "[local_claude] $model is loaded with ctx=$loaded_ctx instead of $CONTEXT_LENGTH. Reload with ctx=$CONTEXT_LENGTH? [Y/n] " answer
+    else
+        read -rp "[local_claude] $model is not loaded. Load it with ctx=$CONTEXT_LENGTH? [Y/n] " answer
+    fi
+    if [[ "$answer" =~ ^[Nn] ]]; then
+        echo "[local_claude] Aborted."
+        exit 1
     fi
 
     echo "[local_claude] Loading $model (ctx=$CONTEXT_LENGTH)..."
@@ -76,7 +87,7 @@ start_proxy() {
         return
     fi
     echo "[local_claude] Starting proxy on :$PROXY_PORT..."
-    python3 "$SCRIPT_DIR/proxy.py" &
+    uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/proxy.py" &
     PROXY_PID=$!
     sleep 1
     if kill -0 $PROXY_PID 2>/dev/null; then
@@ -96,5 +107,5 @@ echo ""
 
 HOME="$LOCAL_HOME" \
 ANTHROPIC_BASE_URL="$PROXY" \
-ANTHROPIC_API_KEY="lmstudio" \
+ANTHROPIC_AUTH_TOKEN="lmstudio" \
 claude --model "$CLAUDE_MODEL" "$@"

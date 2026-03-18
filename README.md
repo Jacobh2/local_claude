@@ -11,7 +11,7 @@ A lightweight proxy sits between Claude Code and LM Studio, handling compatibili
 
 ## Prerequisites
 
-- Python 3.8+
+- [uv](https://docs.astral.sh/uv/) (automatically manages Python 3.14 for the proxy)
 - [LM Studio](https://lmstudio.ai) running with a loaded model
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed (`npm install -g @anthropic-ai/claude-code`)
 
