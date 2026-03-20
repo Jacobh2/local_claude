@@ -18,6 +18,9 @@ import urllib.request
 import sys
 import uuid
 import threading
+import time
+import os
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -39,13 +42,36 @@ FAKE_OUTPUT_TOKENS: int = 1
 MAX_TOKENS_MULTIPLIER: int = 3
 
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TIMING_FILE = os.path.join(_SCRIPT_DIR, "timing.log")
+LOG_FILE = os.path.join(_SCRIPT_DIR, "proxy.log")
+
+
 def ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
 def log(msg: str) -> None:
-    sys.stderr.write(f"[{ts()}] {msg}\n")
-    sys.stderr.flush()
+    with open(LOG_FILE, "a") as f:
+        f.write(f"[{ts()}] {msg}\n")
+        f.flush()
+
+
+def timing_log(msg: str) -> None:
+    with open(TIMING_FILE, "a") as f:
+        f.write(f"[{ts()}] {msg}\n")
+        f.flush()
+
+
+@contextmanager
+def timed(label: str):
+    timing_log(f"[START] {label}")
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - t0
+        timing_log(f"[END] {label}, took {elapsed:.2f}s")
 
 
 def rewrite_image_tool_results(body: JsonDict) -> int:
@@ -119,18 +145,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._json_response(200, {"status": "ok"})
             return
         log(f"GET {self.path} → LM Studio")
-        try:
-            url: str = f"{LM_STUDIO}{self.path}"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=PROXY_TIMEOUT_GET) as resp:
-                data: bytes = resp.read()
-                self.send_response(resp.status)
-                self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
-                self.end_headers()
-                self.wfile.write(data)
-        except Exception as e:
-            log(f"GET {self.path} error: {e}")
-            self._json_response(404, {"error": str(e)})
+        with timed(f"GET {self.path}"):
+            try:
+                url: str = f"{LM_STUDIO}{self.path}"
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=PROXY_TIMEOUT_GET) as resp:
+                    data: bytes = resp.read()
+                    self.send_response(resp.status)
+                    self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
+                    self.end_headers()
+                    self.wfile.write(data)
+            except Exception as e:
+                log(f"GET {self.path} error: {e}")
+                self._json_response(404, {"error": str(e)})
 
     def do_POST(self) -> None:
         length: int = int(self.headers.get("Content-Length", 0))
@@ -139,8 +166,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Token counting → fake
         if "count_tokens" in path:
-            log("Token count → fake")
-            self._json_response(200, {"input_tokens": 100})
+            with timed("Token count (fake)"):
+                log("Token count → fake")
+                self._json_response(200, {"input_tokens": 100})
             return
 
         try:
@@ -154,22 +182,25 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Haiku → always fake as non-streaming JSON (streaming fake hangs Claude Code)
         if is_housekeeping_model(model):
-            log(f"Haiku ({model}) → fake JSON")
-            _, data = fake_haiku_response(model or DEFAULT_MODEL)
-            self._json_response(200, data)
-            self.close_connection = True
+            with timed(f"Haiku fake ({model})"):
+                log(f"Haiku ({model}) → fake JSON")
+                _, data = fake_haiku_response(model or DEFAULT_MODEL)
+                self._json_response(200, data)
+                self.close_connection = True
             return
 
         # Relocate images out of tool_results (LM Studio compat)
         img_count: int = rewrite_image_tool_results(body)
         if img_count:
+            timing_log(f"Image rewrite: relocated {img_count} image(s)")
             log(f"Relocated {img_count} image(s) from tool_result → user message")
 
         # Triple max_tokens — local models undercount tokens vs Claude, so they
         # hit the limit and truncate output well before the logical end
         orig_max: int = body.get("max_tokens", DEFAULT_MAX_TOKENS)
         body["max_tokens"] = max(orig_max * MAX_TOKENS_MULTIPLIER, MIN_BOOSTED_TOKENS)
-        raw = json.dumps(body).encode()
+        with timed("Request prep (JSON serialize)"):
+            raw = json.dumps(body).encode()
 
         log(f"→ LM Studio | model={model} stream={is_stream} "
             f"msgs={len(body.get('messages', []))} "
@@ -183,45 +214,60 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if k.lower() not in ("host", "content-length", "transfer-encoding"):
                 req.add_header(k, self.headers[k])
 
-        try:
-            resp = urllib.request.urlopen(req, timeout=PROXY_TIMEOUT_POST)
-        except Exception as e:
-            log(f"LM Studio error: {e}")
-            self._json_response(502, {
-                "type": "error",
-                "error": {"type": "api_error", "message": str(e)},
-            })
-            return
+        with timed(f"LM Studio POST ({model}, stream={is_stream})"):
+            try:
+                resp = urllib.request.urlopen(req, timeout=PROXY_TIMEOUT_POST)
+            except Exception as e:
+                log(f"LM Studio error: {e}")
+                self._json_response(502, {
+                    "type": "error",
+                    "error": {"type": "api_error", "message": str(e)},
+                })
+                return
 
         if is_stream:
             self.send_response(200)
             ct: str = resp.headers.get("Content-Type", "text/event-stream")
             self.send_header("Content-Type", ct)
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             self.end_headers()
-            try:
-                while True:
-                    chunk: bytes = resp.read(STREAM_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-            except BrokenPipeError, ConnectionResetError:
-                log("Client disconnected during stream")
-            except Exception as e:
-                log(f"Stream error: {e}")
-            finally:
-                resp.close()
-                log("Stream complete")
+            with timed("Stream relay"):
+                chunk_count: int = 0
+                last_chunk_time: float = time.perf_counter()
+                try:
+                    while True:
+                        chunk: bytes = resp.read(STREAM_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        now: float = time.perf_counter()
+                        chunk_elapsed: float = now - last_chunk_time
+                        chunk_count += 1
+                        if chunk_elapsed > 1.0 or chunk_count % 10 == 0:
+                            timing_log(f"  chunk #{chunk_count}, {chunk_elapsed:.2f}s since last, {len(chunk)}B")
+                        last_chunk_time = now
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    log("Client disconnected during stream")
+                except Exception as e:
+                    log(f"Stream error: {e}")
+                finally:
+                    resp.close()
+                    timing_log(f"  total chunks: {chunk_count}")
+                    log("Stream complete")
+            self.close_connection = True
         else:
-            data = resp.read()
-            resp.close()
-            self.send_response(200)
-            self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            with timed("Response read (non-stream)"):
+                data = resp.read()
+                content_type = resp.headers.get("Content-Type", "application/json")
+                resp.close()
+            with timed("Send response to client"):
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
             log("Response complete")
 
     def _json_response(self, code: int, data: JsonDict) -> None:
@@ -244,6 +290,8 @@ class ThreadedHTTPServer(http.server.HTTPServer):
     def _handle(self, request: Any, client_address: tuple[str, int]) -> None:
         try:
             self.finish_request(request, client_address)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client disconnected — harmless
         except Exception:
             self.handle_error(request, client_address)
         finally:
@@ -251,17 +299,20 @@ class ThreadedHTTPServer(http.server.HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"Claude Code ↔ LM Studio middleware | :{PORT} → {LM_STUDIO}")
-    print(f"  Haiku interception: ON")
-    print(f"  Token counting: ON")
-    print(f"  No serialization lock (LM Studio handles queuing)")
-    print(f"\n  export ANTHROPIC_BASE_URL=http://localhost:{PORT}")
-    print("  export ANTHROPIC_AUTH_TOKEN=lmstudio")
-    print("  claude --model qwen3.5-35b-a3b-mlx\n")
+    # Truncate log files on startup
+    for f in (LOG_FILE, TIMING_FILE):
+        open(f, "w").close()
+
+    log(f"Claude Code ↔ LM Studio middleware | :{PORT} → {LM_STUDIO}")
+    log(f"  Haiku interception: ON")
+    log(f"  Token counting: ON")
+    log(f"  No serialization lock (LM Studio handles queuing)")
+    log(f"  export ANTHROPIC_BASE_URL=http://localhost:{PORT}")
+    log(f"  export ANTHROPIC_AUTH_TOKEN=lmstudio")
 
     server = ThreadedHTTPServer(("0.0.0.0", PORT), ProxyHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.")
+        log("Stopped.")
         server.server_close()
